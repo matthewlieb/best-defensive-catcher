@@ -55,6 +55,3 @@ To update the analysis:
 
 Contributions to improve the analysis or extend its capabilities are welcome. Please feel free to submit pull requests or open issues to discuss potential changes.
 
-## License 📜
-
-This project is open source and available under the [MIT License](LICENSE).
