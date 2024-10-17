@@ -14,27 +14,27 @@ Test it out at [phillies-analytics.streamlit.app](https://phillies-analytics.str
 ## Installation 🛠️
 
 1. Clone this repository:
-git clone https://github.com/yourusername/best-defensive-catcher.git
-cd best-defensive-catcher
+`git clone https://github.com/yourusername/best-defensive-catcher.git
+cd best-defensive-catcher`
 
 
 2. Create a virtual environment (optional but recommended):
-python -m venv venv
-source venv/bin/activate # On Windows, use venv\Scripts\activate
+`python -m venv venv`
+`source venv/bin/activate # On Windows, use venv\Scripts\activate`
 
 
 3. Install the required packages:
-pip install -r requirements.txt
+`pip install -r requirements.txt`
 
 
 *Note: If there is no `requirements.txt` file, you can manually install the necessary packages by running:*
-pip install streamlit pandas numpy scikit-learn plotly
+'pip install streamlit pandas numpy scikit-learn plotly
 
 
 ## Usage 🎯
 
 Run the Streamlit app:
-streamlit run best_defensive_catcher.py
+`streamlit run best_defensive_catcher.py`
 
 
 The app will open in your default web browser.
