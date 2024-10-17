@@ -1,6 +1,6 @@
 # MLB Catcher Defensive Analysis
 
-This Streamlit application analyzes the defensive performance of MLB catchers using various metrics and a linear regression model to predict their overall value (WAR).
+Test it out at phillies-analytics.streamlit.app. This Streamlit application analyzes the defensive performance of MLB catchers using various metrics and a linear regression model to predict their overall value (WAR).
 
 ## Features
 
