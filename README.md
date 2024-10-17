@@ -14,35 +14,28 @@ Test it out at [phillies-analytics.streamlit.app](https://phillies-analytics.str
 ## Installation 🛠️
 
 1. Clone this repository:
-git clone https://github.com/yourusername/mlb-catcher-analysis.git
-cd mlb-catcher-analysis
+git clone https://github.com/yourusername/best-defensive-catcher.git
+cd best-defensive-catcher
 
-Copy Code
 
 2. Create a virtual environment (optional but recommended):
 python -m venv venv
 source venv/bin/activate # On Windows, use venv\Scripts\activate
 
-Copy Code
 
 3. Install the required packages:
 pip install -r requirements.txt
 
-Run
-Copy Code
 
 *Note: If there is no `requirements.txt` file, you can manually install the necessary packages by running:*
 pip install streamlit pandas numpy scikit-learn plotly
 
-Copy Code
 
 ## Usage 🎯
 
 Run the Streamlit app:
 streamlit run best_defensive_catcher.py
 
-Run
-Copy Code
 
 The app will open in your default web browser.
 
@@ -61,6 +54,10 @@ To update the analysis:
 ## Contributing 🤝
 
 Contributions to improve the analysis or extend its capabilities are welcome. Please feel free to submit pull requests or open issues to discuss potential changes.
+
+## License 📜
+
+This project is open source and available under the [MIT License](LICENSE).
 
 ## License 📜
 
