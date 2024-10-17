@@ -58,7 +58,3 @@ Contributions to improve the analysis or extend its capabilities are welcome. Pl
 ## License 📜
 
 This project is open source and available under the [MIT License](LICENSE).
-
-## License 📜
-
-This project is open source and available under the [MIT License](LICENSE).
