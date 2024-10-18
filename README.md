@@ -1,4 +1,6 @@
-# MLB Catcher Defensive Analysis ⚾📊
+#![portfolio-13-large](https://github.com/user-attachments/assets/db268439-bcc6-4d85-a28c-f6355d55fa3c)
+ 
+ MLB Catcher Defensive Analysis ⚾📊
 
 Test it out at [phillies-analytics.streamlit.app](https://phillies-analytics.streamlit.app). This Streamlit application analyzes the defensive performance of MLB catchers using various metrics and a linear regression model to predict their overall value (WAR).
 
