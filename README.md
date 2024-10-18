@@ -1,4 +1,4 @@
-#![portfolio-13-large](https://github.com/user-attachments/assets/db268439-bcc6-4d85-a28c-f6355d55fa3c)
+![portfolio-13-large](https://github.com/user-attachments/assets/db268439-bcc6-4d85-a28c-f6355d55fa3c)
  
  MLB Catcher Defensive Analysis ⚾📊
 
