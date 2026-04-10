@@ -8,6 +8,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import cross_val_score, KFold
 import plotly.express as px
 import requests
 import io
@@ -273,6 +274,20 @@ def build_dataset(season):
     return fld
 
 
+@st.cache_data(ttl=3600, show_spinner="Loading historical training data…")
+def build_multiyear_dataset(seasons: tuple) -> pd.DataFrame:
+    """Combine multiple seasons into one DataFrame for model training."""
+    frames = []
+    for s in seasons:
+        try:
+            df = build_dataset(s).copy()
+            df["season"] = s
+            frames.append(df)
+        except Exception:
+            pass
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 # ── Load & filter ─────────────────────────────────────────────────────────────
 
 st.title("⚾ MLB Catcher Defensive Analysis")
@@ -322,63 +337,83 @@ sort_col = MODEL_TARGET_LABEL if MODEL_TARGET_LABEL in disp_df.columns else "CS%
 if sort_col in disp_df.columns:
     disp_df = disp_df.sort_values(sort_col, ascending=False).reset_index(drop=True)
 
-# ── Train models (Option B: predict framing from traditional stats) ───────────
+# ── Multi-year training + current-season test ─────────────────────────────────
+# Train on the 5 seasons prior to the selected season; test on the selected season.
+# This is genuine out-of-sample prediction — the model has never seen the test catchers.
+TRAIN_SEASONS = tuple(range(max(2018, season - 5), season))
+
+train_raw = build_multiyear_dataset(TRAIN_SEASONS)
+
+def _prep(d):
+    needed = MODEL_FEATURE_COLS + [MODEL_TARGET_COL, "player_name"]
+    available = [c for c in needed if c in d.columns]
+    if set(needed) - set(available):
+        return pd.DataFrame()
+    return d[needed].dropna().copy()
+
+train_df = _prep(train_raw)
+test_df  = _prep(df)          # current selected season, innings-filtered
+
 modeled = False
 model_df = pd.DataFrame()
 
-has_framing = (
-    MODEL_TARGET_COL in df.columns
-    and df[MODEL_TARGET_COL].notna().sum() >= 5
-)
-features_present = all(c in df.columns for c in MODEL_FEATURE_COLS)
+if len(train_df) >= 20 and len(test_df) >= 5:
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(train_df[MODEL_FEATURE_COLS].values)
+    y_train = train_df[MODEL_TARGET_COL].values
+    X_test  = scaler.transform(test_df[MODEL_FEATURE_COLS].values)
+    y_test  = test_df[MODEL_TARGET_COL].values
 
-if has_framing and features_present:
-    model_df = df[MODEL_FEATURE_COLS + [MODEL_TARGET_COL, "player_name"]].dropna().copy()
-    model_df = model_df.rename(columns={"player_name": "Catcher"})
-    if len(model_df) >= 5:
-        X_raw = model_df[MODEL_FEATURE_COLS].values
-        y = model_df[MODEL_TARGET_COL].values
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
 
-        scaler = StandardScaler()
-        X = scaler.fit_transform(X_raw)
+    # Linear Regression
+    lr = LinearRegression()
+    lr_cv_r2   = cross_val_score(lr, X_train, y_train, cv=kf, scoring="r2").mean()
+    lr.fit(X_train, y_train)
+    lr_pred    = lr.predict(X_test)
+    lr_test_r2 = r2_score(y_test, lr_pred)
+    lr_rmse    = np.sqrt(mean_squared_error(y_test, lr_pred))
 
-        lr = LinearRegression().fit(X, y)
-        lr_pred = lr.predict(X)
-        lr_r2 = r2_score(y, lr_pred)
-        lr_rmse = np.sqrt(mean_squared_error(y, lr_pred))
+    # Random Forest
+    rf = RandomForestRegressor(n_estimators=300, max_depth=5, random_state=42)
+    rf_cv_r2   = cross_val_score(rf, X_train, y_train, cv=kf, scoring="r2").mean()
+    rf.fit(X_train, y_train)
+    rf_pred    = rf.predict(X_test)
+    rf_test_r2 = r2_score(y_test, rf_pred)
+    rf_rmse    = np.sqrt(mean_squared_error(y_test, rf_pred))
 
-        rf = RandomForestRegressor(n_estimators=200, max_depth=5, random_state=42).fit(X, y)
-        rf_pred = rf.predict(X)
-        rf_r2 = r2_score(y, rf_pred)
-        rf_rmse = np.sqrt(mean_squared_error(y, rf_pred))
+    # Build display model_df (test set with predictions + residuals)
+    model_df = test_df.copy()
+    model_df["LR Predicted Framing"] = lr_pred
+    model_df["RF Predicted Framing"] = rf_pred
+    model_df["LR Residual"] = y_test - lr_pred   # positive = better than expected
+    model_df["RF Residual"] = y_test - rf_pred
+    model_df = model_df.rename(columns={
+        "player_name":    "Catcher",
+        MODEL_TARGET_COL: MODEL_TARGET_LABEL,
+        **{c: lbl for c, lbl in zip(MODEL_FEATURE_COLS, MODEL_FEATURE_LABELS)},
+    })
 
-        model_df["LR Predicted Framing"] = lr_pred
-        model_df["RF Predicted Framing"] = rf_pred
-        # rename for display
-        model_df = model_df.rename(columns={
-            c: lbl for c, lbl in zip(MODEL_FEATURE_COLS, MODEL_FEATURE_LABELS)
-        })
-        model_df = model_df.rename(columns={MODEL_TARGET_COL: MODEL_TARGET_LABEL})
+    lr_imp = (
+        pd.DataFrame({"Feature": MODEL_FEATURE_LABELS, "Coefficient": lr.coef_})
+        .sort_values("Coefficient", ascending=False)
+    )
+    rf_imp = (
+        pd.DataFrame({"Feature": MODEL_FEATURE_LABELS, "Importance": rf.feature_importances_})
+        .sort_values("Importance", ascending=False)
+    )
 
-        lr_imp = (
-            pd.DataFrame({"Feature": MODEL_FEATURE_LABELS, "Coefficient": lr.coef_})
-            .sort_values("Coefficient", ascending=False)
-        )
-        rf_imp = (
-            pd.DataFrame({"Feature": MODEL_FEATURE_LABELS, "Importance": rf.feature_importances_})
-            .sort_values("Importance", ascending=False)
-        )
-
-        modeled = True
+    modeled = True
 
 
 # ── Render helper ─────────────────────────────────────────────────────────────
 
-def render_model_tab(mdf, pred_col, actual_col, r2_val, rmse_val, imp_df, imp_col, title):
-    c1, c2, c3 = st.columns(3)
-    c1.metric("R²", f"{r2_val:.3f}")
-    c2.metric("RMSE", f"{rmse_val:.3f}")
-    c3.metric("Sample Size", len(mdf))
+def render_model_tab(mdf, pred_col, actual_col, cv_r2, test_r2, rmse, imp_df, imp_col, title, n_train):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("CV R² (train)", f"{cv_r2:.3f}", help="5-fold cross-validation R² on training seasons")
+    c2.metric("Test R² (out-of-sample)", f"{test_r2:.3f}", help=f"R² on {season} — data the model never saw")
+    c3.metric("Test RMSE", f"{rmse:.2f} runs")
+    c4.metric("Training samples", n_train)
 
     fig_imp = px.bar(
         imp_df, x="Feature", y=imp_col,
@@ -393,35 +428,32 @@ def render_model_tab(mdf, pred_col, actual_col, r2_val, rmse_val, imp_df, imp_co
     fig_sc = px.scatter(
         mdf, x=actual_col, y=pred_col,
         hover_name="Catcher",
-        title=f"Actual vs Predicted {actual_col} — {title}",
-        labels={actual_col: f"Actual {actual_col}", pred_col: f"Predicted {actual_col}"},
+        title=f"Actual vs Predicted Framing Runs — {season} (out-of-sample test)",
+        labels={actual_col: "Actual Framing Runs", pred_col: "Predicted Framing Runs"},
         color=pred_col,
         color_continuous_scale="Blues",
     )
-    fig_sc.add_shape(
-        type="line",
-        x0=v_min, y0=v_min, x1=v_max, y1=v_max,
-        line=dict(color="red", dash="dash", width=2),
-    )
+    fig_sc.add_shape(type="line", x0=v_min, y0=v_min, x1=v_max, y1=v_max,
+                     line=dict(color="red", dash="dash", width=2))
     fig_sc.update_layout(coloraxis_showscale=False)
     st.plotly_chart(fig_sc, use_container_width=True)
 
     best = mdf.loc[mdf[pred_col].idxmax()]
-    st.success(
-        f"**{best['Catcher']}** leads with a predicted {actual_col} of **{best[pred_col]:.2f}**"
-    )
+    st.success(f"**{best['Catcher']}** leads with a predicted {mdf[pred_col].max():.1f} framing runs")
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 Data & Rankings", "📈 Linear Regression", "🌲 Random Forest"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Data & Rankings",
+    "📈 Linear Regression",
+    "🌲 Random Forest",
+    "🔍 Undervalued Catchers",
+])
 
 with tab1:
     st.subheader(f"{season} Season — {len(disp_df)} catchers")
-
-    float_fmt = {
-        col: st.column_config.NumberColumn(format="%.2f")
-        for col in disp_df.select_dtypes("float").columns
-    }
+    float_fmt = {col: st.column_config.NumberColumn(format="%.2f")
+                 for col in disp_df.select_dtypes("float").columns}
     st.dataframe(disp_df, use_container_width=True, height=420, column_config=float_fmt)
 
     if MODEL_TARGET_LABEL in disp_df.columns:
@@ -444,7 +476,7 @@ with tab1:
     st.plotly_chart(fig_cs, use_container_width=True)
 
 _NO_MODEL_MSG = (
-    "Models require Statcast framing data (Baseball Savant) as the target variable. "
+    "Models require Statcast framing data. "
     "Framing data wasn't available for this season/filter — try a different season."
 )
 
@@ -452,11 +484,13 @@ with tab2:
     st.subheader("Linear Regression")
     if modeled:
         st.caption(
-            "**What this model does:** uses traditional box-score stats (CS%, Innings, Passed Balls) "
-            "to predict Statcast Framing Runs — an independently-computed advanced metric. "
-            "This tells us how well old-school scouting stats correlate with modern pitch framing."
+            f"**Trained on {len(train_df)} catcher-seasons ({min(TRAIN_SEASONS)}–{max(TRAIN_SEASONS)}). "
+            f"Tested on {len(test_df)} catchers from {season} — data the model has never seen.**  \n"
+            "Features: CS%, Innings, Passed Balls → Target: Statcast Framing Runs"
         )
-        render_model_tab(model_df, "LR Predicted Framing", MODEL_TARGET_LABEL, lr_r2, lr_rmse, lr_imp, "Coefficient", "Linear Regression")
+        render_model_tab(model_df, "LR Predicted Framing", MODEL_TARGET_LABEL,
+                         lr_cv_r2, lr_test_r2, lr_rmse, lr_imp, "Coefficient",
+                         "Linear Regression", len(train_df))
     else:
         st.info(_NO_MODEL_MSG)
 
@@ -464,22 +498,63 @@ with tab3:
     st.subheader("Random Forest")
     if modeled:
         st.caption(
-            "**What this model does:** same prediction as Linear Regression but using a Random Forest — "
-            "an ensemble of decision trees that can capture non-linear relationships between stats."
+            f"**Trained on {len(train_df)} catcher-seasons ({min(TRAIN_SEASONS)}–{max(TRAIN_SEASONS)}). "
+            f"Tested on {len(test_df)} catchers from {season} — data the model has never seen.**  \n"
+            "Ensemble of 300 decision trees capturing non-linear relationships."
         )
-        render_model_tab(model_df, "RF Predicted Framing", MODEL_TARGET_LABEL, rf_r2, rf_rmse, rf_imp, "Importance", "Random Forest")
+        render_model_tab(model_df, "RF Predicted Framing", MODEL_TARGET_LABEL,
+                         rf_cv_r2, rf_test_r2, rf_rmse, rf_imp, "Importance",
+                         "Random Forest", len(train_df))
 
         st.markdown("---")
         st.subheader("Model Comparison")
         cmp = pd.DataFrame({
             "Model": ["Linear Regression", "Random Forest"],
-            "R²": [lr_r2, rf_r2],
-            "RMSE": [lr_rmse, rf_rmse],
+            "CV R² (train)": [lr_cv_r2, rf_cv_r2],
+            "Test R² (out-of-sample)": [lr_test_r2, rf_test_r2],
+            "Test RMSE (runs)": [lr_rmse, rf_rmse],
         })
-        st.dataframe(
-            cmp.style.format({"R²": "{:.4f}", "RMSE": "{:.4f}"}),
-            use_container_width=True,
-            hide_index=True,
+        st.dataframe(cmp.style.format({c: "{:.3f}" for c in cmp.columns[1:]}),
+                     use_container_width=True, hide_index=True)
+    else:
+        st.info(_NO_MODEL_MSG)
+
+with tab4:
+    st.subheader("Undervalued & Overvalued Catchers")
+    if modeled:
+        st.caption(
+            "**Residual = Actual Framing Runs − Predicted Framing Runs.**  \n"
+            "A large positive residual means a catcher frames far better than their traditional stats "
+            "(CS%, Passed Balls) would predict — a hidden gem. "
+            "A large negative residual means their framing underperforms what their stats suggest."
         )
+        resid_df = (
+            model_df[["Catcher", MODEL_TARGET_LABEL, "RF Predicted Framing", "RF Residual",
+                       "CS%", "Innings", "Passed Balls"]]
+            .sort_values("RF Residual", ascending=False)
+            .reset_index(drop=True)
+        )
+        resid_df.index += 1
+
+        st.markdown("#### Hidden Gems — better framers than traditional stats suggest")
+        top = resid_df.head(5)
+        fig_top = px.bar(top, x="Catcher", y="RF Residual",
+                         color="RF Residual", color_continuous_scale="Greens",
+                         title=f"Most Undervalued Framers — {season}")
+        fig_top.update_layout(coloraxis_showscale=False)
+        st.plotly_chart(fig_top, use_container_width=True)
+
+        st.markdown("#### Overvalued — framing underperforms traditional stats")
+        bot = resid_df.tail(5).sort_values("RF Residual")
+        fig_bot = px.bar(bot, x="Catcher", y="RF Residual",
+                         color="RF Residual", color_continuous_scale="Reds_r",
+                         title=f"Most Overvalued Framers — {season}")
+        fig_bot.update_layout(coloraxis_showscale=False)
+        st.plotly_chart(fig_bot, use_container_width=True)
+
+        st.markdown("#### Full Rankings")
+        float_fmt2 = {col: st.column_config.NumberColumn(format="%.2f")
+                      for col in resid_df.select_dtypes("float").columns}
+        st.dataframe(resid_df, use_container_width=True, height=500, column_config=float_fmt2)
     else:
         st.info(_NO_MODEL_MSG)
