@@ -35,6 +35,9 @@ with st.sidebar:
         help="Minimum innings behind the plate to include a catcher.",
     )
     st.markdown("---")
+    if st.button("🔄 Reload data", help="Clear cache and re-fetch all data"):
+        st.cache_data.clear()
+        st.rerun()
     st.caption(
         "Data from MLB Stats API & Baseball Savant via "
         "[pybaseball](https://github.com/jldbc/pybaseball)"
@@ -122,6 +125,14 @@ _BROWSER_HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://baseballsavant.mlb.com/",
+    "Origin": "https://baseballsavant.mlb.com",
+    "Connection": "keep-alive",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
 }
 
 
@@ -137,7 +148,7 @@ def _savant_name_to_fullname(name_series):
     return name_series.apply(_flip)
 
 
-@st.cache_data(ttl=86400, show_spinner="Fetching Statcast framing data…")
+@st.cache_data(ttl=3600, show_spinner="Fetching Statcast framing data…")
 def _load_statcast_framing(season):
     import io
     url = (
