@@ -115,14 +115,45 @@ def _load_fg_batting(season):
         return pd.DataFrame()
 
 
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _savant_name_to_fullname(name_series):
+    """Convert 'Last, First' → 'First Last'."""
+    def _flip(n):
+        if pd.isna(n):
+            return n
+        parts = str(n).split(",", 1)
+        if len(parts) == 2:
+            return parts[1].strip() + " " + parts[0].strip()
+        return n.strip()
+    return name_series.apply(_flip)
+
+
 @st.cache_data(ttl=86400, show_spinner="Fetching Statcast framing data…")
 def _load_statcast_framing(season):
+    import io
     try:
-        from pybaseball import statcast_catcher_framing
-        df = statcast_catcher_framing(season, season)
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/catcher-framing"
+            f"?type=catcher&seasonStart={season}&seasonEnd={season}"
+            f"&team=&min=q&sortColumn=rv_tot&sortDirection=desc&csv=true"
+        )
+        resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.content.decode("utf-8-sig")))
         df.columns = df.columns.str.lower()
-        if "year" in df.columns:
-            df = df[df["year"] == season]
+        # columns: id, name (Last, First), pitches, rv_tot, ...
+        if "name" in df.columns:
+            df["player_name"] = _savant_name_to_fullname(df["name"])
+            df = df[df["player_name"].notna()].copy()
         return df
     except Exception:
         return None
@@ -130,10 +161,20 @@ def _load_statcast_framing(season):
 
 @st.cache_data(ttl=86400, show_spinner="Fetching pop-time data…")
 def _load_statcast_poptime(season):
+    import io
     try:
-        from pybaseball import statcast_catcher_poptime
-        df = statcast_catcher_poptime(season)
+        url = (
+            f"https://baseballsavant.mlb.com/leaderboard/poptime"
+            f"?year={season}&team=&min2b=5&min3b=0&csv=true"
+        )
+        resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.content.decode("utf-8-sig")))
         df.columns = df.columns.str.lower()
+        # columns: entity_name (Last, First), entity_id, ...
+        name_col = _first_match(df, "entity_name", "name")
+        if name_col:
+            df["player_name"] = _savant_name_to_fullname(df[name_col])
         return df
     except Exception:
         return None
@@ -185,69 +226,39 @@ def build_dataset(season):
 
     # ── Optional: Baseball Savant framing ─────────────────────────────────
     framing = _load_statcast_framing(season)
-    if framing is not None and not framing.empty:
-        fn = _first_match(framing, "first_name")
-        ln = _first_match(framing, "last_name")
-        nm = _first_match(framing, "name")
-        if fn and ln:
-            framing["player_name"] = framing[fn].str.strip() + " " + framing[ln].str.strip()
-        elif nm:
-            framing["player_name"] = framing[nm]
-
-        if "player_name" in framing.columns:
-            opp = _first_match(framing, "n_called_pitches", "called_pitches")
-            runs = _first_match(framing, "runs_extra_strikes", "framing_runs")
-            rename_map = {}
-            if opp:
-                rename_map[opp] = "framing_opportunities"
-            if runs:
-                rename_map[runs] = "framing_runs"
-            framing = framing.rename(columns=rename_map)
-            sv_cols = ["player_name"] + [
-                c for c in ["framing_opportunities", "framing_runs"] if c in framing.columns
-            ]
-            if len(sv_cols) > 1:
-                fld = fld.merge(
-                    framing[sv_cols].drop_duplicates("player_name"),
-                    on="player_name", how="left",
-                )
+    if framing is not None and not framing.empty and "player_name" in framing.columns:
+        # Direct CSV columns: id, name, pitches, rv_tot, pct_tot, ...
+        rename_map = {}
+        if "rv_tot" in framing.columns:
+            rename_map["rv_tot"] = "framing_runs"
+        if "pitches" in framing.columns:
+            rename_map["pitches"] = "framing_opportunities"
+        framing = framing.rename(columns=rename_map)
+        sv_cols = ["player_name"] + [
+            c for c in ["framing_opportunities", "framing_runs"] if c in framing.columns
+        ]
+        if len(sv_cols) > 1:
+            fld = fld.merge(
+                framing[sv_cols].drop_duplicates("player_name"),
+                on="player_name", how="left",
+            )
 
     # ── Optional: Baseball Savant pop time ────────────────────────────────
     poptime = _load_statcast_poptime(season)
-    if poptime is not None and not poptime.empty:
-        fn = _first_match(poptime, "first_name")
-        ln = _first_match(poptime, "last_name")
-        nm = _first_match(poptime, "name")
-        if fn and ln:
-            poptime["player_name"] = poptime[fn].str.strip() + " " + poptime[ln].str.strip()
-        elif nm:
-            poptime["player_name"] = poptime[nm]
-
-        if "player_name" in poptime.columns:
-            pop_cols = ["player_name"] + [
-                c for c in ["pop_2b_sba", "arm_2b_3b_sba"] if c in poptime.columns
-            ]
-            if len(pop_cols) > 1:
-                fld = fld.merge(
-                    poptime[pop_cols].drop_duplicates("player_name"),
-                    on="player_name", how="left",
-                )
-
-    # ── Composite score fallback when WAR is unavailable ─────────────────
-    if "WAR" not in fld.columns or fld["WAR"].notna().sum() < 5:
-        components = []
-        if "cs_pct" in fld.columns and fld["cs_pct"].notna().sum() >= 5:
-            s = fld["cs_pct"]
-            components.append((s - s.mean()) / s.std())
-        if "pb" in fld.columns and "innings" in fld.columns and fld["innings"].gt(0).sum() >= 5:
-            pb_rate = fld["pb"] / (fld["innings"] / 9).replace(0, np.nan)
-            components.append(-(pb_rate - pb_rate.mean()) / pb_rate.std())
-        if "framing_runs" in fld.columns and fld["framing_runs"].notna().sum() >= 5:
-            s = fld["framing_runs"]
-            components.append((s - s.mean()) / s.std())
-        if components:
-            fld["WAR"] = sum(c.fillna(0) for c in components) / len(components)
-            fld["_composite_score"] = True
+    if poptime is not None and not poptime.empty and "player_name" in poptime.columns:
+        # Direct CSV columns: entity_name, pop_2b_sba, maxeff_arm_2b_3b_sba, ...
+        rename_map = {}
+        if "maxeff_arm_2b_3b_sba" in poptime.columns:
+            rename_map["maxeff_arm_2b_3b_sba"] = "arm_2b_3b_sba"
+        poptime = poptime.rename(columns=rename_map)
+        pop_cols = ["player_name"] + [
+            c for c in ["pop_2b_sba", "arm_2b_3b_sba"] if c in poptime.columns
+        ]
+        if len(pop_cols) > 1:
+            fld = fld.merge(
+                poptime[pop_cols].drop_duplicates("player_name"),
+                on="player_name", how="left",
+            )
 
     return fld
 
@@ -275,45 +286,48 @@ if df.empty:
     st.warning("No catchers meet the current filter. Try lowering the minimum innings threshold.")
     st.stop()
 
-# ── Feature catalog (in priority order) ──────────────────────────────────────
-FEATURES = {
-    # MLB Stats API (always available)
-    "cs_pct":   "CS%",
-    "innings":  "Innings",
-    "pb":       "Passed Balls",
-    # Baseball Savant (optional enrichment)
-    "framing_runs":          "Framing Runs",
+# ── All display columns ───────────────────────────────────────────────────────
+ALL_COLS = {
+    "cs_pct":              "CS%",
+    "innings":             "Innings",
+    "pb":                  "Passed Balls",
+    "framing_runs":        "Framing Runs",
     "framing_opportunities": "Framing Opps",
-    "pop_2b_sba":            "Pop Time 2B (s)",
-    "arm_2b_3b_sba":         "Arm Strength (mph)",
+    "pop_2b_sba":          "Pop Time 2B (s)",
+    "arm_2b_3b_sba":       "Arm Strength (mph)",
 }
 
-feature_cols = [
-    c for c in FEATURES
-    if c in df.columns and df[c].notna().mean() > 0.4
-]
-feature_labels = [FEATURES[c] for c in feature_cols]
+# Option B: traditional box-score stats → predict Statcast framing runs
+# Features must be independent of the target; framing is computed separately by Statcast
+MODEL_FEATURE_COLS = ["cs_pct", "innings", "pb"]
+MODEL_FEATURE_LABELS = ["CS%", "Innings", "Passed Balls"]
+MODEL_TARGET_COL = "framing_runs"
+MODEL_TARGET_LABEL = "Framing Runs"
 
-has_war = "WAR" in df.columns and df["WAR"].notna().sum() >= 5
-is_composite = has_war and df.get("_composite_score", pd.Series(False)).any()
-score_label = "Def. Score" if is_composite else "WAR"
+disp_cols_present = ["player_name"] + [c for c in ALL_COLS if c in df.columns]
+disp_df = df[disp_cols_present].copy()
+disp_df = disp_df.rename(columns={"player_name": "Catcher", **ALL_COLS})
+# Sort by framing runs if available, else CS%
+sort_col = MODEL_TARGET_LABEL if MODEL_TARGET_LABEL in disp_df.columns else "CS%"
+if sort_col in disp_df.columns:
+    disp_df = disp_df.sort_values(sort_col, ascending=False).reset_index(drop=True)
 
-# ── Display DataFrame ─────────────────────────────────────────────────────────
-disp_cols = ["player_name"] + feature_cols + (["WAR"] if has_war else [])
-disp_df = df[disp_cols].dropna(subset=feature_cols[:1]).copy()
-disp_df = disp_df.rename(columns={"player_name": "Catcher", "WAR": score_label, **FEATURES})
-if has_war:
-    disp_df = disp_df.sort_values(score_label, ascending=False).reset_index(drop=True)
-
-# ── Train models ──────────────────────────────────────────────────────────────
+# ── Train models (Option B: predict framing from traditional stats) ───────────
 modeled = False
 model_df = pd.DataFrame()
 
-if has_war and len(disp_df) >= 5:
-    model_df = disp_df.dropna(subset=feature_labels + [score_label]).copy()
+has_framing = (
+    MODEL_TARGET_COL in df.columns
+    and df[MODEL_TARGET_COL].notna().sum() >= 5
+)
+features_present = all(c in df.columns for c in MODEL_FEATURE_COLS)
+
+if has_framing and features_present:
+    model_df = df[MODEL_FEATURE_COLS + [MODEL_TARGET_COL, "player_name"]].dropna().copy()
+    model_df = model_df.rename(columns={"player_name": "Catcher"})
     if len(model_df) >= 5:
-        X_raw = model_df[feature_labels].values
-        y = model_df[score_label].values
+        X_raw = model_df[MODEL_FEATURE_COLS].values
+        y = model_df[MODEL_TARGET_COL].values
 
         scaler = StandardScaler()
         X = scaler.fit_transform(X_raw)
@@ -328,16 +342,20 @@ if has_war and len(disp_df) >= 5:
         rf_r2 = r2_score(y, rf_pred)
         rf_rmse = np.sqrt(mean_squared_error(y, rf_pred))
 
-        model_df = model_df.copy()
-        model_df[f"LR Predicted {score_label}"] = lr_pred
-        model_df[f"RF Predicted {score_label}"] = rf_pred
+        model_df["LR Predicted Framing"] = lr_pred
+        model_df["RF Predicted Framing"] = rf_pred
+        # rename for display
+        model_df = model_df.rename(columns={
+            c: lbl for c, lbl in zip(MODEL_FEATURE_COLS, MODEL_FEATURE_LABELS)
+        })
+        model_df = model_df.rename(columns={MODEL_TARGET_COL: MODEL_TARGET_LABEL})
 
         lr_imp = (
-            pd.DataFrame({"Feature": feature_labels, "Coefficient": lr.coef_})
+            pd.DataFrame({"Feature": MODEL_FEATURE_LABELS, "Coefficient": lr.coef_})
             .sort_values("Coefficient", ascending=False)
         )
         rf_imp = (
-            pd.DataFrame({"Feature": feature_labels, "Importance": rf.feature_importances_})
+            pd.DataFrame({"Feature": MODEL_FEATURE_LABELS, "Importance": rf.feature_importances_})
             .sort_values("Importance", ascending=False)
         )
 
@@ -396,44 +414,50 @@ with tab1:
     }
     st.dataframe(disp_df, use_container_width=True, height=420, column_config=float_fmt)
 
-    if is_composite:
-        st.info(
-            "WAR data unavailable from external sources. "
-            "Showing a **Defensive Score** (composite of CS%, Passed Ball rate"
-            + (", Framing Runs" if "Framing Runs" in disp_df.columns else "")
-            + ") — used as the model target.",
-        )
-
-    if has_war:
-        fig_war = px.bar(
-            disp_df.head(20), x="Catcher", y=score_label,
-            color=score_label, color_continuous_scale="Blues",
-            title=f"Top Catchers by {score_label} — {season}",
-        )
-        fig_war.update_layout(xaxis_tickangle=-40, coloraxis_showscale=False)
-        st.plotly_chart(fig_war, use_container_width=True)
-
-    if "Framing Runs" in disp_df.columns:
+    if MODEL_TARGET_LABEL in disp_df.columns:
         fig_frm = px.bar(
-            disp_df.sort_values("Framing Runs", ascending=False).head(20),
-            x="Catcher", y="Framing Runs",
-            color="Framing Runs", color_continuous_scale="Purples",
+            disp_df.dropna(subset=[MODEL_TARGET_LABEL]).head(20),
+            x="Catcher", y=MODEL_TARGET_LABEL,
+            color=MODEL_TARGET_LABEL, color_continuous_scale="Purples",
             title=f"Top Catchers by Framing Runs — {season}",
         )
         fig_frm.update_layout(xaxis_tickangle=-40, coloraxis_showscale=False)
         st.plotly_chart(fig_frm, use_container_width=True)
 
+    fig_cs = px.bar(
+        disp_df.dropna(subset=["CS%"]).sort_values("CS%", ascending=False).head(20),
+        x="Catcher", y="CS%",
+        color="CS%", color_continuous_scale="Blues",
+        title=f"Top Catchers by Caught Stealing % — {season}",
+    )
+    fig_cs.update_layout(xaxis_tickangle=-40, coloraxis_showscale=False)
+    st.plotly_chart(fig_cs, use_container_width=True)
+
+_NO_MODEL_MSG = (
+    "Models require Statcast framing data (Baseball Savant) as the target variable. "
+    "Framing data wasn't available for this season/filter — try a different season."
+)
+
 with tab2:
     st.subheader("Linear Regression")
     if modeled:
-        render_model_tab(model_df, f"LR Predicted {score_label}", score_label, lr_r2, lr_rmse, lr_imp, "Coefficient", "Linear Regression")
+        st.caption(
+            "**What this model does:** uses traditional box-score stats (CS%, Innings, Passed Balls) "
+            "to predict Statcast Framing Runs — an independently-computed advanced metric. "
+            "This tells us how well old-school scouting stats correlate with modern pitch framing."
+        )
+        render_model_tab(model_df, "LR Predicted Framing", MODEL_TARGET_LABEL, lr_r2, lr_rmse, lr_imp, "Coefficient", "Linear Regression")
     else:
-        st.info("Not enough data for modeling. Try lowering the minimum innings threshold.")
+        st.info(_NO_MODEL_MSG)
 
 with tab3:
     st.subheader("Random Forest")
     if modeled:
-        render_model_tab(model_df, f"RF Predicted {score_label}", score_label, rf_r2, rf_rmse, rf_imp, "Importance", "Random Forest")
+        st.caption(
+            "**What this model does:** same prediction as Linear Regression but using a Random Forest — "
+            "an ensemble of decision trees that can capture non-linear relationships between stats."
+        )
+        render_model_tab(model_df, "RF Predicted Framing", MODEL_TARGET_LABEL, rf_r2, rf_rmse, rf_imp, "Importance", "Random Forest")
 
         st.markdown("---")
         st.subheader("Model Comparison")
@@ -448,4 +472,4 @@ with tab3:
             hide_index=True,
         )
     else:
-        st.info("Not enough data for modeling. Try lowering the minimum innings threshold.")
+        st.info(_NO_MODEL_MSG)
