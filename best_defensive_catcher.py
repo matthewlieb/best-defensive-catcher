@@ -9,6 +9,8 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 import plotly.express as px
+import requests
+import io
 
 st.set_page_config(
     page_title="MLB Catcher Defensive Analysis",
@@ -72,7 +74,6 @@ def _parse_innings(inn_str):
 
 @st.cache_data(ttl=86400, show_spinner="Fetching catcher fielding stats from MLB Stats API…")
 def _load_fg_fielding(season):
-    import requests
     url = (
         "https://statsapi.mlb.com/api/v1/stats"
         f"?stats=season&group=fielding&season={season}"
@@ -150,7 +151,6 @@ def _savant_name_to_fullname(name_series):
 
 @st.cache_data(ttl=3600, show_spinner="Fetching Statcast framing data…")
 def _load_statcast_framing(season):
-    import io
     url = (
         f"https://baseballsavant.mlb.com/leaderboard/catcher-framing"
         f"?type=catcher&seasonStart={season}&seasonEnd={season}"
@@ -178,7 +178,6 @@ def _load_statcast_framing(season):
 
 @st.cache_data(ttl=86400, show_spinner="Fetching pop-time data…")
 def _load_statcast_poptime(season):
-    import io
     try:
         url = (
             f"https://baseballsavant.mlb.com/leaderboard/poptime"
