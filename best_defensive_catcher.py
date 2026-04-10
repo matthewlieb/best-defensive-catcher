@@ -127,13 +127,7 @@ _BROWSER_HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://baseballsavant.mlb.com/",
-    "Origin": "https://baseballsavant.mlb.com",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-origin",
 }
 
 
@@ -161,7 +155,7 @@ def _load_statcast_framing(season):
         if resp.status_code != 200:
             st.sidebar.warning(f"Framing: HTTP {resp.status_code}")
             return None
-        raw = resp.content.decode("utf-8-sig")
+        raw = resp.text.lstrip("\ufeff")  # strip BOM if present
         if not raw.strip().startswith('"id"') and not raw.strip().startswith('id'):
             st.sidebar.warning(f"Framing: unexpected response — {raw[:120]}")
             return None
@@ -185,7 +179,7 @@ def _load_statcast_poptime(season):
         )
         resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
         resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.content.decode("utf-8-sig")))
+        df = pd.read_csv(io.StringIO(resp.text.lstrip("\ufeff")))
         df.columns = df.columns.str.lower()
         # columns: entity_name (Last, First), entity_id, ...
         name_col = _first_match(df, "entity_name", "name")
