@@ -140,22 +140,28 @@ def _savant_name_to_fullname(name_series):
 @st.cache_data(ttl=86400, show_spinner="Fetching Statcast framing data…")
 def _load_statcast_framing(season):
     import io
+    url = (
+        f"https://baseballsavant.mlb.com/leaderboard/catcher-framing"
+        f"?type=catcher&seasonStart={season}&seasonEnd={season}"
+        f"&team=&min=q&sortColumn=rv_tot&sortDirection=desc&csv=true"
+    )
     try:
-        url = (
-            f"https://baseballsavant.mlb.com/leaderboard/catcher-framing"
-            f"?type=catcher&seasonStart={season}&seasonEnd={season}"
-            f"&team=&min=q&sortColumn=rv_tot&sortDirection=desc&csv=true"
-        )
         resp = requests.get(url, headers=_BROWSER_HEADERS, timeout=30)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.content.decode("utf-8-sig")))
+        if resp.status_code != 200:
+            st.sidebar.warning(f"Framing: HTTP {resp.status_code}")
+            return None
+        raw = resp.content.decode("utf-8-sig")
+        if not raw.strip().startswith('"id"') and not raw.strip().startswith('id'):
+            st.sidebar.warning(f"Framing: unexpected response — {raw[:120]}")
+            return None
+        df = pd.read_csv(io.StringIO(raw))
         df.columns = df.columns.str.lower()
-        # columns: id, name (Last, First), pitches, rv_tot, ...
         if "name" in df.columns:
             df["player_name"] = _savant_name_to_fullname(df["name"])
             df = df[df["player_name"].notna()].copy()
         return df
-    except Exception:
+    except Exception as e:
+        st.sidebar.warning(f"Framing error: {e}")
         return None
 
 
