@@ -36,7 +36,7 @@ with st.sidebar:
     )
     st.markdown("---")
     st.caption(
-        "Data from FanGraphs & Baseball Savant via "
+        "Data from MLB Stats API & Baseball Savant via "
         "[pybaseball](https://github.com/jldbc/pybaseball)"
     )
 
@@ -53,20 +53,66 @@ def _first_match(df, *candidates):
 
 # ── Data loading (each step cached independently) ─────────────────────────────
 
-@st.cache_data(ttl=86400, show_spinner="Fetching catcher fielding stats from FanGraphs…")
+def _parse_innings(inn_str):
+    """Convert baseball innings string '450.1' → decimal (450.333…)."""
+    if inn_str is None:
+        return 0.0
+    s = str(inn_str).strip()
+    if "." in s:
+        whole, frac = s.split(".", 1)
+        return int(whole or 0) + int(frac or 0) / 3.0
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+@st.cache_data(ttl=86400, show_spinner="Fetching catcher fielding stats from MLB Stats API…")
 def _load_fg_fielding(season):
-    from pybaseball import fielding_stats
-    df = fielding_stats(season, season, qual=0)
-    df.columns = df.columns.str.lower()
+    import requests
+    url = (
+        "https://statsapi.mlb.com/api/v1/stats"
+        f"?stats=season&group=fielding&season={season}"
+        "&gameType=R&playerPool=ALL&position=C&limit=500"
+    )
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    rows = []
+    for stat_group in data.get("stats", []):
+        for split in stat_group.get("splits", []):
+            player = split.get("player", {})
+            stat = split.get("stat", {})
+            sb = int(stat.get("stolenBases") or 0)
+            cs = int(stat.get("caughtStealing") or 0)
+            rows.append({
+                "name": player.get("fullName", ""),
+                "pos": "C",
+                "inn": _parse_innings(stat.get("innings")),
+                "pb": int(stat.get("passedBall") or 0),
+                "cs_attempts": sb + cs,
+                "cs": cs,
+            })
+
+    df = pd.DataFrame(rows)
+    # Keep totals row per player (MLB API may split by team for traded players)
+    df = df.sort_values("inn", ascending=False).drop_duplicates("name")
+    df["cs_pct"] = df.apply(
+        lambda r: r["cs"] / r["cs_attempts"] if r["cs_attempts"] > 0 else np.nan, axis=1
+    )
     return df
 
 
-@st.cache_data(ttl=86400, show_spinner="Fetching WAR from FanGraphs…")
+@st.cache_data(ttl=86400, show_spinner="Fetching WAR from Baseball Reference…")
 def _load_fg_batting(season):
-    from pybaseball import batting_stats
-    df = batting_stats(season, season, qual=0)
-    df.columns = df.columns.str.lower()
-    return df
+    try:
+        from pybaseball import batting_stats_bref
+        df = batting_stats_bref(season)
+        df.columns = df.columns.str.lower()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=86400, show_spinner="Fetching Statcast framing data…")
@@ -95,7 +141,7 @@ def _load_statcast_poptime(season):
 
 @st.cache_data(ttl=86400, show_spinner="Building catcher dataset…")
 def build_dataset(season):
-    # ── Primary: FanGraphs fielding (always works) ────────────────────────
+    # ── Primary: MLB Stats API fielding (always works) ───────────────────
     fld = _load_fg_fielding(season)
 
     # Filter to catchers
@@ -124,7 +170,7 @@ def build_dataset(season):
     if "cs%" in fld.columns:
         fld = fld.rename(columns={"cs%": "cs_pct"})
 
-    # ── WAR from FanGraphs batting ────────────────────────────────────────
+    # ── WAR from Baseball Reference ──────────────────────────────────────
     bat = _load_fg_batting(season)
     bat_name = _first_match(bat, "name", "player name", "playername")
     war_col = _first_match(bat, "war")
@@ -195,7 +241,7 @@ def build_dataset(season):
 st.title("⚾ MLB Catcher Defensive Analysis")
 st.markdown(
     f"Real MLB data · **{season}** season · "
-    "Source: FanGraphs & Baseball Savant"
+    "Source: MLB Stats API & Baseball Savant"
 )
 
 try:
