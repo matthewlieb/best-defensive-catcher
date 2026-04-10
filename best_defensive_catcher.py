@@ -233,6 +233,22 @@ def build_dataset(season):
                     on="player_name", how="left",
                 )
 
+    # ── Composite score fallback when WAR is unavailable ─────────────────
+    if "WAR" not in fld.columns or fld["WAR"].notna().sum() < 5:
+        components = []
+        if "cs_pct" in fld.columns and fld["cs_pct"].notna().sum() >= 5:
+            s = fld["cs_pct"]
+            components.append((s - s.mean()) / s.std())
+        if "pb" in fld.columns and "innings" in fld.columns and fld["innings"].gt(0).sum() >= 5:
+            pb_rate = fld["pb"] / (fld["innings"] / 9).replace(0, np.nan)
+            components.append(-(pb_rate - pb_rate.mean()) / pb_rate.std())
+        if "framing_runs" in fld.columns and fld["framing_runs"].notna().sum() >= 5:
+            s = fld["framing_runs"]
+            components.append((s - s.mean()) / s.std())
+        if components:
+            fld["WAR"] = sum(c.fillna(0) for c in components) / len(components)
+            fld["_composite_score"] = True
+
     return fld
 
 
@@ -261,19 +277,15 @@ if df.empty:
 
 # ── Feature catalog (in priority order) ──────────────────────────────────────
 FEATURES = {
-    # FanGraphs (primary — always available)
+    # MLB Stats API (always available)
     "cs_pct":   "CS%",
-    "drs":      "DRS",
-    "arm":      "ARM",
     "innings":  "Innings",
     "pb":       "Passed Balls",
-    # FanGraphs Statcast page (available some seasons)
-    "framing":  "Framing (FG)",
     # Baseball Savant (optional enrichment)
-    "framing_runs":        "Framing Runs (SV)",
+    "framing_runs":          "Framing Runs",
     "framing_opportunities": "Framing Opps",
-    "pop_2b_sba":          "Pop Time 2B (s)",
-    "arm_2b_3b_sba":       "Arm Strength (mph)",
+    "pop_2b_sba":            "Pop Time 2B (s)",
+    "arm_2b_3b_sba":         "Arm Strength (mph)",
 }
 
 feature_cols = [
@@ -283,23 +295,25 @@ feature_cols = [
 feature_labels = [FEATURES[c] for c in feature_cols]
 
 has_war = "WAR" in df.columns and df["WAR"].notna().sum() >= 5
+is_composite = has_war and df.get("_composite_score", pd.Series(False)).any()
+score_label = "Def. Score" if is_composite else "WAR"
 
 # ── Display DataFrame ─────────────────────────────────────────────────────────
 disp_cols = ["player_name"] + feature_cols + (["WAR"] if has_war else [])
 disp_df = df[disp_cols].dropna(subset=feature_cols[:1]).copy()
-disp_df = disp_df.rename(columns={"player_name": "Catcher", **FEATURES})
+disp_df = disp_df.rename(columns={"player_name": "Catcher", "WAR": score_label, **FEATURES})
 if has_war:
-    disp_df = disp_df.sort_values("WAR", ascending=False).reset_index(drop=True)
+    disp_df = disp_df.sort_values(score_label, ascending=False).reset_index(drop=True)
 
 # ── Train models ──────────────────────────────────────────────────────────────
 modeled = False
 model_df = pd.DataFrame()
 
 if has_war and len(disp_df) >= 5:
-    model_df = disp_df.dropna(subset=feature_labels + ["WAR"]).copy()
+    model_df = disp_df.dropna(subset=feature_labels + [score_label]).copy()
     if len(model_df) >= 5:
         X_raw = model_df[feature_labels].values
-        y = model_df["WAR"].values
+        y = model_df[score_label].values
 
         scaler = StandardScaler()
         X = scaler.fit_transform(X_raw)
@@ -315,8 +329,8 @@ if has_war and len(disp_df) >= 5:
         rf_rmse = np.sqrt(mean_squared_error(y, rf_pred))
 
         model_df = model_df.copy()
-        model_df["LR Predicted WAR"] = lr_pred
-        model_df["RF Predicted WAR"] = rf_pred
+        model_df[f"LR Predicted {score_label}"] = lr_pred
+        model_df[f"RF Predicted {score_label}"] = rf_pred
 
         lr_imp = (
             pd.DataFrame({"Feature": feature_labels, "Coefficient": lr.coef_})
@@ -332,7 +346,7 @@ if has_war and len(disp_df) >= 5:
 
 # ── Render helper ─────────────────────────────────────────────────────────────
 
-def render_model_tab(mdf, pred_col, r2_val, rmse_val, imp_df, imp_col, title):
+def render_model_tab(mdf, pred_col, actual_col, r2_val, rmse_val, imp_df, imp_col, title):
     c1, c2, c3 = st.columns(3)
     c1.metric("R²", f"{r2_val:.3f}")
     c2.metric("RMSE", f"{rmse_val:.3f}")
@@ -347,18 +361,18 @@ def render_model_tab(mdf, pred_col, r2_val, rmse_val, imp_df, imp_col, title):
     fig_imp.update_layout(coloraxis_showscale=False)
     st.plotly_chart(fig_imp, use_container_width=True)
 
-    war_min, war_max = mdf["WAR"].min(), mdf["WAR"].max()
+    v_min, v_max = mdf[actual_col].min(), mdf[actual_col].max()
     fig_sc = px.scatter(
-        mdf, x="WAR", y=pred_col,
+        mdf, x=actual_col, y=pred_col,
         hover_name="Catcher",
-        title=f"Actual vs Predicted WAR — {title}",
-        labels={"WAR": "Actual WAR", pred_col: "Predicted WAR"},
+        title=f"Actual vs Predicted {actual_col} — {title}",
+        labels={actual_col: f"Actual {actual_col}", pred_col: f"Predicted {actual_col}"},
         color=pred_col,
         color_continuous_scale="Blues",
     )
     fig_sc.add_shape(
         type="line",
-        x0=war_min, y0=war_min, x1=war_max, y1=war_max,
+        x0=v_min, y0=v_min, x1=v_max, y1=v_max,
         line=dict(color="red", dash="dash", width=2),
     )
     fig_sc.update_layout(coloraxis_showscale=False)
@@ -366,7 +380,7 @@ def render_model_tab(mdf, pred_col, r2_val, rmse_val, imp_df, imp_col, title):
 
     best = mdf.loc[mdf[pred_col].idxmax()]
     st.success(
-        f"🏆 **{best['Catcher']}** leads with a predicted WAR of **{best[pred_col]:.2f}**"
+        f"**{best['Catcher']}** leads with a predicted {actual_col} of **{best[pred_col]:.2f}**"
     )
 
 
@@ -382,32 +396,29 @@ with tab1:
     }
     st.dataframe(disp_df, use_container_width=True, height=420, column_config=float_fmt)
 
+    if is_composite:
+        st.info(
+            "WAR data unavailable from external sources. "
+            "Showing a **Defensive Score** (composite of CS%, Passed Ball rate"
+            + (", Framing Runs" if "Framing Runs" in disp_df.columns else "")
+            + ") — used as the model target.",
+        )
+
     if has_war:
         fig_war = px.bar(
-            disp_df.head(20), x="Catcher", y="WAR",
-            color="WAR", color_continuous_scale="Blues",
-            title=f"Top Catchers by WAR — {season}",
+            disp_df.head(20), x="Catcher", y=score_label,
+            color=score_label, color_continuous_scale="Blues",
+            title=f"Top Catchers by {score_label} — {season}",
         )
         fig_war.update_layout(xaxis_tickangle=-40, coloraxis_showscale=False)
         st.plotly_chart(fig_war, use_container_width=True)
 
-    if "DRS" in disp_df.columns:
-        fig_drs = px.bar(
-            disp_df.sort_values("DRS", ascending=False).head(20),
-            x="Catcher", y="DRS",
-            color="DRS", color_continuous_scale="Greens",
-            title=f"Top Catchers by Defensive Runs Saved — {season}",
-        )
-        fig_drs.update_layout(xaxis_tickangle=-40, coloraxis_showscale=False)
-        st.plotly_chart(fig_drs, use_container_width=True)
-
-    if "Framing Runs (SV)" in disp_df.columns or "Framing (FG)" in disp_df.columns:
-        frm_col = "Framing Runs (SV)" if "Framing Runs (SV)" in disp_df.columns else "Framing (FG)"
+    if "Framing Runs" in disp_df.columns:
         fig_frm = px.bar(
-            disp_df.sort_values(frm_col, ascending=False).head(20),
-            x="Catcher", y=frm_col,
-            color=frm_col, color_continuous_scale="Purples",
-            title=f"Top Catchers by Framing — {season}",
+            disp_df.sort_values("Framing Runs", ascending=False).head(20),
+            x="Catcher", y="Framing Runs",
+            color="Framing Runs", color_continuous_scale="Purples",
+            title=f"Top Catchers by Framing Runs — {season}",
         )
         fig_frm.update_layout(xaxis_tickangle=-40, coloraxis_showscale=False)
         st.plotly_chart(fig_frm, use_container_width=True)
@@ -415,14 +426,14 @@ with tab1:
 with tab2:
     st.subheader("Linear Regression")
     if modeled:
-        render_model_tab(model_df, "LR Predicted WAR", lr_r2, lr_rmse, lr_imp, "Coefficient", "Linear Regression")
+        render_model_tab(model_df, f"LR Predicted {score_label}", score_label, lr_r2, lr_rmse, lr_imp, "Coefficient", "Linear Regression")
     else:
-        st.info("Modeling requires WAR data and at least 5 catchers meeting the innings threshold.")
+        st.info("Not enough data for modeling. Try lowering the minimum innings threshold.")
 
 with tab3:
     st.subheader("Random Forest")
     if modeled:
-        render_model_tab(model_df, "RF Predicted WAR", rf_r2, rf_rmse, rf_imp, "Importance", "Random Forest")
+        render_model_tab(model_df, f"RF Predicted {score_label}", score_label, rf_r2, rf_rmse, rf_imp, "Importance", "Random Forest")
 
         st.markdown("---")
         st.subheader("Model Comparison")
@@ -437,4 +448,4 @@ with tab3:
             hide_index=True,
         )
     else:
-        st.info("Modeling requires WAR data and at least 5 catchers meeting the innings threshold.")
+        st.info("Not enough data for modeling. Try lowering the minimum innings threshold.")
