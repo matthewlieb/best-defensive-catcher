@@ -54,7 +54,7 @@ def _first_match(df, *candidates):
 @st.cache_data(ttl=86400, show_spinner="Fetching framing data from Baseball Savant…")
 def _load_framing(season):
     from pybaseball import statcast_catcher_framing
-    df = statcast_catcher_framing(min_year=season, max_year=season)
+    df = statcast_catcher_framing(season, season)  # positional: min_year, max_year
     df.columns = df.columns.str.lower()
     if "year" in df.columns:
         df = df[df["year"] == season]
@@ -76,7 +76,7 @@ def _load_poptime(season):
 def _load_blocking(season):
     try:
         from pybaseball import statcast_catcher_fielding_run_value
-        df = statcast_catcher_fielding_run_value(min_year=season, max_year=season, type="blocking")
+        df = statcast_catcher_fielding_run_value(season, season, "blocking")
         df.columns = df.columns.str.lower()
         if "year" in df.columns:
             df = df[df["year"] == season]
